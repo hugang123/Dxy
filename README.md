@@ -1,10 +1,11 @@
 # Dxy
-Caculate the genetic distance of Dxy(like Fst) between the two populations form the vcf file .
+Caculate the genetic distance of Dxy(like Fst) between the two populations form the vcf file(.gz foramt) .
+
 
 usage: win_Dxy.py [-h] -v vcf -p poplist [-w window [default:100000]]
                   [-s step [default:50000]] [-o output [default:Dxy.txt]]
 
-Calculate Dxy form the vcf(.gz) between the two populations.
+
 
 optional arguments:
           -h, --help            show this help message and exit
