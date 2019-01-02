@@ -1,0 +1,205 @@
+#!/usr/bin/env python
+# coding=utf-8
+# python3
+
+import gzip
+import re
+import math
+import sys
+from argparse import ArgumentParser,RawTextHelpFormatter
+from datetime import datetime
+
+
+def read_file_gz(gzfile):
+    open_file = gzip.open(gzfile, 'rb')
+    for i in open_file:
+        line = str(i, encoding='utf8')
+        if line and not line.startswith('#'):
+            #print(line)
+            yield (line.rstrip('\r\n'))
+    open_file.close()
+
+
+# 读取文件最后一行，获取该染色体最大的pos，在窗口滑动时有作用
+def read_last_line(gzfile):
+    open_file = gzip.open(gzfile, 'rb')
+    first_line = open_file.readline()  # 读第一行
+    max_pos = 0
+    off = -50  # 设置偏移量
+    while True:
+        open_file.seek(off, 2)  # seek(off, 2)表示文件指针：从文件末尾(2)开始向前50个字符(-50)
+        lines = open_file.readlines()  # 读取文件指针范围内所有行
+        if len(lines) >= 2:  # 判断是否最后至少有两行，这样保证了最后一行是完整的
+            #max_pos += int(str(lines[-1], encoding='utf8').split("\t")[1])  # 取最后一行
+            max_pos += int(str(lines[-1], encoding='utf8').split("\t")[1])  # 取最后一行
+            break
+        # 如果off为50时得到的readlines只有一行内容，那么不能保证最后一行是完整的
+        # 所以off翻倍重新运行，直到readlines不止一行
+        off *= 2
+    #print(max_pos)
+    return max_pos
+
+
+# read_pop_file(file)[0] 为popA  [1]为popB
+def read_pop_file(pop_file):
+    open_file = open(pop_file, "r")
+    popA = re.split("\s+", open_file.readline().split(":")[1].rstrip("\n"))
+    popB = re.split("\s+", open_file.readline().split(":")[1].rstrip("\n"))
+    open_file.close()
+    return popA, popB
+
+
+def get_pop_index(gzfile, popfile):
+    all_pop = []
+    pop2 = read_pop_file(popfile)
+    open_file = gzip.open(gzfile, 'rb')
+    for i in open_file:
+        line = str(i, encoding='utf8')
+        if line and line.startswith('#CHROM'):
+            all_pop.extend(re.split("\s+",line.strip()))
+            # print(all_pop)
+            # print(len(all_pop))
+            break
+    open_file.close()
+    popA_index = [all_pop.index(i) for i in pop2[0]]
+    popB_index = [all_pop.index(j) for j in pop2[1]]
+    # print([popA_index,popB_index])
+    return popA_index, popB_index
+
+
+def log(*args):
+    print(*args)
+
+
+# 设置滑动窗口，该postion即为last line中最大的
+def slide_window(window, step, position):
+    window_start = 1
+    while window_start < position:
+        if int(window_start + window -1) <= position:
+            # print(100/int(window))
+            yield int(window_start), int(window_start + window - 1)
+        elif int(window_start + window -1) > position:
+            window = int(position) - int(window_start) + 1
+            # print(100 / int(window))
+            yield int(window_start), int(position)
+            break
+        window_start += step
+
+def get_pop_alles_freq(gzfile, popfile):
+    popA_index, popB_index = get_pop_index(gzfile, popfile)
+    popAB_index = []
+    popAB_index.extend(popA_index)
+    popAB_index.extend(popB_index)
+    # print(popAB_index)
+    Number_popA = len(popA_index)
+    Number_popB = len(popB_index)
+    AF_info = []
+    for line in read_file_gz(gzfile):
+        #print(line)
+        # 记录信息的列表
+        a = []
+        # 切分vcf，获取关键信息
+        #array = line.split("\t")
+        array = re.split("\s+",line)
+        # print(array)
+        # 记录染色体、位置等相关信息
+        chr, pos = array[0], int(array[1])
+        # 获取所有样品的基因型
+        all_genotype = [i.split(":")[0] for i in array[9:]]
+        # 从所有样品的基因型中抽提出我们测试的两个群体的基因型
+        pop_genotype = [all_genotype[i - 9] for i in popAB_index]
+        # 计算每个位点的AF
+        popA_ref = [pop_genotype[:Number_popA].count(i) for i in ['0/0', '0/1', '1/1']]
+        # print(popA_ref)
+        popA_Ref_freq = (2 * popA_ref[0] + 1 * popA_ref[1]) / (2 * sum(popA_ref)) if sum(popA_ref) > 0 else ""
+        # print(popA_Ref_freq)
+        popB_ref = [pop_genotype[Number_popA:].count(i) for i in ['0/0', '0/1', '1/1']]
+        # print(popB_ref)
+        popB_Ref_freq = (2 * popB_ref[0] + 1 * popB_ref[1]) / (2 * sum(popB_ref)) if sum(popB_ref) > 0 else ""
+        # print(popB_Ref_freq)
+        a.extend([chr, pos, popA_Ref_freq, popB_Ref_freq])
+        # 判断混合群体是否存在多样性，排除"./."之外，不少于一中基因型
+        # print(pop_genotype)
+        myset = set(pop_genotype)
+        if "./." in pop_genotype:
+            myset.remove("./.")
+        if len(myset) >= 2:
+            a.append(1)
+        else:
+            a.append(0)
+        AF_info.append(a)
+    # print(AF_info)
+    return AF_info
+
+
+def calculate_dxy(gzfile, popfile, window, step, outfile):
+    open_file = open(outfile, 'w')
+    open_file.write('chrom\twindow_start\twindow_end\tN_SNP\tDxy\n')
+    max_pos = read_last_line(gzfile)  # 获取最大pos
+    AF_info = get_pop_alles_freq(gzfile, popfile)
+    chr = AF_info[0][0]
+    # 滑动窗口
+    for start, end in slide_window(window, step, max_pos):
+        a = 0  # 多态性位点
+        b = 0  # 记录行数
+        Ja = Jb = Jab = 0  # 记录杂合度
+        Dxy = ''
+        print([start,end])
+        for line in AF_info:
+            print(line)
+            if int(start) <= line[1] < int(start) + int(step):
+                b += 1
+                # print(b)
+            if int(start) <= line[1] <= int(end):
+                # if line[4] == 1 and bool (line[2]) and bool(line[3]),bool(0)为false，易错
+                if line[4] == 1 and str(line[2]).count(".") == 1 and str(line[3]).count("."):
+                    a += 1
+                    Ja += (2 * line[2] * (1 - line[2]))
+                    Jb += (2 * line[3] * (1 - line[3]))
+                    Jab += (1 + 2*line[2]*line[3]-line[2]-line[3])
+                    # Jab += line[2] * line[3] +(1-line[2])(1-line[3])
+                    # print([Ja,Jb,Jab])
+                continue
+            elif line[1] > int(end):
+                del AF_info[0:b]
+                break
+        print(a)
+        if all([a, Ja, Jb]) > 0:
+            JA = 1 - Ja / window
+            JB = 1 - Jb / window
+            JAB = (Jab + window - a) / window
+            print(JA,JB,JAB)
+            print(JAB/math.sqrt(JA * JB))
+            print(math.log(JAB/math.sqrt(JA * JB),10))
+            print(math.log(JAB/math.sqrt(JA * JB),math.e))
+            Dxy = bool(Dxy) - math.log(JAB / math.sqrt(JA * JB), math.e)
+        else:
+            Dxy = Dxy + "NA"
+        open_file.write("{}\t{}\t{}\t{}\t{}\n".format(chr, start, end, a, Dxy))
+    open_file.close()
+
+def get_para(parameters):
+    parser=ArgumentParser(formatter_class=RawTextHelpFormatter,description='Calculate Dxy form the vcf(.gz) between the two populations.',epilog='Contact information:\n\tName: hugang\n\tEmail: hugang_biology@163.com')
+    parser.add_argument('-v',dest="gzvcf",type=str,required=True,metavar='vcf',help="vcf file with gz format")
+    parser.add_argument('-p',dest="poplist",type=str,required=True,metavar='poplist',help="input the two populations file,each row represent one pop \nExample\npop1:Sampl1\tsample2\npop2:Sample3\tSample4")
+    parser.add_argument('-w',dest='window',default=100000,type=int,required=False,metavar='window [default:100000]',help="window size")
+    parser.add_argument('-s',dest='step',default=50000,type=int,required=False,metavar='step [default:50000]',help="step size")
+    parser.add_argument('-o',dest='output',default='Dxy.txt',type=str,required=False,metavar='output [default:Dxy.txt]',help="output file")
+    return vars(parser.parse_args(parameters))
+    # vars() 函数返回对象object的属性和属性值的字典对象
+
+def main():
+    parameters = get_para(sys.argv[1:])
+    calculate_dxy(parameters['gzvcf'],parameters['poplist'],parameters['window'],parameters['step'],parameters['output'])
+
+if __name__ == "__main__":
+    startTime = datetime.now()
+    main()
+    endTime = datetime.now()
+    time_consume = (endTime - startTime).seconds
+    log("startTime", endTime, "\n", "endTime", endTime, "\n", "time_consume", time_consume, "\n")
+
+
+
+# 思路，还是先计算每个位点的AF，然后再计算
+# 结果为NA，两种情况，第一窗口内无SNP；第二种情况，某一群体在该窗口所有位点为纯合，且为同一种基因型，常见于SNP数目少的情况
